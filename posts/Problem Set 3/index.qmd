@@ -1,0 +1,335 @@
+---
+title: "Problem Set 3"
+author: "Joe Penders"
+date: "2023-09-21"
+format: html
+---
+
+### 1. Create a new Rmarkdown document that will show case your data exploration, modeling, and error testing.
+
+```{r}
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(glmnet)
+library(lubridate)
+library(caret)
+library(dummy)
+library(lattice)
+library(corrplot)
+library(rpart)
+library(rpart.plot)
+library(iml)
+library(patchwork)
+tc = read_csv("ToyotaCorolla.csv")
+```
+
+### 2. Explore the data and determine the number of variables and the quantity of any missing values.
+
+If values are missing, prescribe a plan to deal with the problem.
+
+```{r}
+str(tc)
+colSums(is.na(tc))
+```
+
+We have 1436 observations across 39 variables. There are no missing values to deal with.
+
+### 3. Analyze whether the Price variable is appropriate for a linear regression model and discuss its distribution.
+
+Are there any transformations that we might apply to the price variable?
+
+```{r}
+# Price Distribution
+
+hist(tc$Price)
+
+# Rearrange the columns to place Log_Price immediately after Price
+
+tc <- tc %>%
+  mutate(Log_Price = log(Price)) %>%
+  select(1:3, Log_Price, 4:ncol(tc))
+  
+hist(tc$Log_Price)
+
+
+```
+
+Price is definitely skewed to the right, therefore I used a log transformation. After the transformation, the distribution of price is much closer to being symmetric.
+
+### 4. Is there a relationship between any of the features in the data and the Price feature?
+
+Perform some exploratory analysis to determine some features that are related using a feature plot.
+
+```{r}
+
+# Factor categorical variables, get rid of some unnecessary ones.
+  
+tc <- tc %>% 
+  select(-Id, -Model, -Mfg_Month, -Cylinders, -Quarterly_Tax) %>%
+  rename(Age = Age_08_04) %>%
+  mutate(CC = if_else(CC == 16000, 2000, CC)) %>%
+  mutate_at(vars(-one_of(
+    c('Price',
+      'Log_Price',
+      'Age',
+      'KM',
+      'HP',
+      'CC',
+      'Weight')
+  )), .funs = factor)
+
+```
+
+One Corolla has a 16000 CC engine, and that does not make sense. At the very least, it's a massive outlier. I replaced this outlier with the value of 2000, which is the maximum otherwise.
+
+```{r}
+
+# Separate predictors and response
+
+tc_numeric <- tc[, sapply(tc, is.numeric)]
+x <- tc_numeric[, setdiff(names(tc_numeric), "Log_Price")]
+y <- tc_numeric$Log_Price
+
+# Use featurePlot
+
+caret::featurePlot(x, y, plot = "scatter")
+
+```
+
+It appears there is a negative relationship between `Age`, `KM` and`Log_Price`. There may be a positive relationship between `Weight` and `Log_Price`. I speculate that `Weight` may be a confounding variable with other variables that increase both weight and the price of the car, such as additional safety features.
+
+```{r}
+
+tc_temp <- tc
+
+# Add a new column to the data that categorizes cars as "30 years or newer" or "older than 30 years"
+tc_temp$AgeGroup <- ifelse(tc_temp$Age <= 30, "30 years or newer", "older than 30 years")
+
+# Plot the Weight vs Age
+ggplot(tc_temp, aes(x=Age, y=Weight, color=AgeGroup)) + 
+  geom_point() +
+  geom_smooth(data=subset(tc, Age <= 30), aes(group=1), method="lm", formula=y~1, se=FALSE, linetype="solid", color="blue") +
+  geom_smooth(data=subset(tc, Age > 30), aes(group=2), method="lm", formula=y~1, se=FALSE, linetype="solid", color="orange") +
+  labs(title="Weight vs. Age of Cars", x="Age", y="Weight") +
+  scale_color_manual(values=c("30 years or newer"="blue", "older than 30 years"="red"), name="Age Group") +
+  theme_minimal()
+
+rm(tc_temp)
+
+```
+
+It is very clear based on the *Weight vs. Age of Cars* graph that newer cars are significantly heavier. Therefore, I am removing the weight variable and leaving age.
+
+```{r}
+tc <- select(tc, -'Weight')
+```
+
+```{r}
+# Check categorical variables
+
+categorical_list <- list()
+
+factor_cols <- names(tc)[sapply(tc, is.factor)]
+
+for(i in factor_cols) {
+  categorical_list[[i]] <- table(tc[[i]])
+}
+
+# Convert all factors to dummy vars.
+tc_dum = dummy(tc, int = TRUE)
+tc_num = tc %>%
+  keep(is.numeric)
+tc = bind_cols(tc_num, tc_dum)
+rm(tc_dum, tc_num)
+
+# remove one dummy from each categorical var
+tc <- tc %>%
+  select(-Mfg_Year_1998,
+-Mfg_Year_1999,
+-Mfg_Year_2000,
+-Mfg_Year_2001,
+-Mfg_Year_2002,
+-Mfg_Year_2003,
+-Mfg_Year_2004,
+-Fuel_Type_CNG,
+-Met_Color_0,
+-Color_Beige,
+-Color_Yellow,
+-Color_Violet,
+-Automatic_0,
+-Doors_2,
+-Gears_3,
+-Mfr_Guarantee_0,
+-BOVAG_Guarantee_0,
+-Guarantee_Period_13,
+-Guarantee_Period_18,
+-Guarantee_Period_20,
+-Guarantee_Period_24,
+-Guarantee_Period_28,
+-Guarantee_Period_36,
+-ABS_0,
+-Airbag_1_0,
+-Airbag_2_0,
+-Airco_0,
+-Automatic_airco_0,
+-Boardcomputer_0,
+-CD_Player_0,
+-Central_Lock_0,
+-Powered_Windows_0,
+-Power_Steering_0,
+-Radio_0,
+-Mistlamps_0,
+-Sport_Model_0,
+-Backseat_Divider_0,
+-Metallic_Rim_0,
+-Radio_cassette_0,
+-Parking_Assistant_0,
+-Tow_Bar_0)
+
+```
+
+### 5. Are there any predictor variables in the data that are potentially too strongly related to each other?
+
+Make sure to use reference any visualizations, tables, or numbers to show this.
+
+```{r}
+
+# Compute the correlation matrix
+tc_minus_price <- select(tc, -"Price", -"Log_Price")
+cor_matrix <- cor(tc_minus_price, use = "pairwise.complete.obs")
+
+# Compute the correlation matrix
+cor_matrix <- cor(tc_minus_price, use="complete.obs", method="pearson")
+
+# Find pairs with correlation coefficient greater than 0.7 (in absolute value)
+high_cor <- which(abs(cor_matrix) > 0.8 & cor_matrix != 1, arr.ind = TRUE)
+
+# Extract pairs and their corresponding correlation values
+result <- data.frame(
+  Variable1 = rownames(cor_matrix)[high_cor[, 1]],
+  Variable2 = rownames(cor_matrix)[high_cor[, 2]],
+  Correlation = cor_matrix[high_cor]
+)
+
+# remove duplicates
+result <- result[!duplicated(result$Correlation), ]
+print(result)
+
+rm(tc_minus_price)
+
+```
+
+`Radio_cassette_1` and `Radio_1` are extremely correlated, having an r value of 0.99, therefore I am dropping `Radio_1`. Corollas that come with a cassette player almost always have a radio and vice versa. Similarly, we see a strong correlation of r = .88 between `Powered_Windows_1` and `Central_Lock_1`, indicating those features typically come together. So, I am dropping `Central_Lock_1` as well.
+
+```{r}
+tc <- select(tc, -'Radio_1', -'Central_Lock_1')
+```
+
+### 6. Partition your data into a training set with 70% of the observations and a testing set with the remaining 30%.
+
+```{r}
+# Partition the data.
+set.seed(1001)
+samp = createDataPartition(tc$Log_Price, p = 0.7, list = FALSE)
+training = tc[samp, ]
+training <- (select(training, -"Price"))
+testing = tc[-samp, ]
+testing <- select(testing, -"Price")
+rm(samp)
+```
+
+### 7. Based on your results and relationships in questions (4) and (5), build a regression tree model to predict car prices. Make sure to conduct cross validation to evaluate the model and choose the best cost complexity parameter for this problem (use default values for minsplit, minbucket, maxdepth, etc. But choose grid of cp values to tune over). Use rpart.plot to view your tree and discuss its complexity, usefulness, etc. What role is pre-pruning and post-pruning playing here?
+
+```{r}
+
+# Use cross-validation to determine the best cp value
+control <- trainControl(method = "cv", number = 10) 
+cpGrid <- expand.grid(.cp = seq(0.001, 0.05, by = 0.001))
+trainResult <- caret::train(Log_Price ~ ., data = training, method = "rpart", 
+                     trControl = control, tuneGrid = cpGrid)
+
+bestCp <- trainResult$bestTune$cp
+print(bestCp)
+
+# Train the regression tree model using the best cp value
+treeModel <- rpart(Log_Price ~ ., data = training, control = rpart.control(cp = bestCp))
+
+# Plot the tree
+rpart.plot(treeModel)
+
+```
+
+The best cp value to use for the model is .001. The regression tree has 8 levels. Pre-pruning occurs here by choosing a larger value for cp to get a smaller tree.
+
+### 8. Look at the feature importance (using permuted feature importance in "iml" package, with loss = "rmse" and compare = "ratio") and determine which features have the biggest effect, and which might be okay to remove.
+
+```{r}
+
+tree_predictor = iml::Predictor$new(treeModel, data = training)
+tree_imp = iml::FeatureImp$new(tree_predictor, loss = "rmse", compare = "ratio", n.repetitions = 30)
+plot(tree_imp)
+
+```
+
+```{r}
+tree_imp$results
+```
+
+`Age`, `KM`, and `HP` are the most important features. Any features with an importance value of 1 would probably be okay to be removed.
+
+### 9. Parsimony is about obtaining the simplest model possible, without oversimplifying. Remove a few of the less useful features and retrain / cross validate / tune your tree.
+
+```{r}
+
+training_simp <- subset(training, select = -c(Tow_Bar_1, Parking_Assistant_1, Metallic_Rim_1, Boardcomputer_1,
+                                              BOVAG_Guarantee_1, Automatic_airco_1)) 
+testing_simp <- subset(testing, select = -c(Tow_Bar_1, Parking_Assistant_1, Metallic_Rim_1, Boardcomputer_1,
+                                              BOVAG_Guarantee_1, Automatic_airco_1)) 
+
+# Use cross-validation to determine the best cp value
+control <- trainControl(method = "cv", number = 10) 
+cpGrid <- expand.grid(.cp = seq(0.001, 0.05, by = 0.001))
+trainResult <- caret::train(Log_Price ~ ., data = training_simp, method = "rpart", 
+                     trControl = control, tuneGrid = cpGrid)
+
+bestCp <- trainResult$bestTune$cp
+print(bestCp)
+
+#  Train the regression tree model using the best cp value
+treeModel <- rpart(Log_Price ~ ., data = training_simp, control = rpart.control(cp = bestCp))
+
+# 5. Plot the tree
+rpart.plot(treeModel)
+
+```
+
+### 10. Use the model resulting from question 9 and test predictions on the testing data. Compare the cross validation error and and testing data. Spend some time interpreting what this prediction error means for your pricing model and its use for CorollaCrowd.
+
+```{r}
+
+#  Use the trained regression tree model to make predictions on the testing data
+predictions <- predict(treeModel, newdata = testing_simp)
+
+# Calculate the root mean squared error (RMSE) for the testing data
+rmse_test <- sqrt(mean((predictions - testing_simp$Log_Price)^2))
+
+# Obtain the cross-validation error (RMSE) from the training phase
+rmse_cv <- trainResult$results[which.min(trainResult$results$RMSE),]$RMSE
+
+# Print the results
+print(paste("Cross-validation RMSE: ", rmse_cv))
+print(paste("Testing RMSE: ", rmse_test))
+
+# Compare the errors
+if (rmse_test < rmse_cv) {
+  print("Testing error is lower than cross-validation error.")
+} else if (rmse_test > rmse_cv) {
+  print("Testing error is higher than cross-validation error.")
+} else {
+  print("Testing error and cross-validation error are the same.")
+}
+
+```
+
+The model performed slightly worse on the testing data, but the difference isn't substantial. For CorollaCrowd, this model could be used to estimate car value.
