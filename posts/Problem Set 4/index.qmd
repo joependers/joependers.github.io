@@ -1,0 +1,252 @@
+---
+title: "Problem Set 4"
+author: "Joe Penders"
+date: "2023-09-30"
+format: html
+---
+
+```{r setup, include=FALSE, message=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+library(tidyverse)
+library(dplyr)
+library(rpart)
+library(caret)
+library(AppliedPredictiveModeling)
+library(DALEX)
+library(ggthemes)
+library(pROC)
+library(performanceEstimation)
+library(glmnet)
+library(fastDummies)
+```
+
+## 1.
+
+The objective of the NVO is to predict a binary outcome: whether a person will respond to a mailing or not. Classification is the right approach to accomplish this task. By utilizing classification, the organization can take advantage of historical data to identify patterns or characteristics that are indicative of a positive response. This will enable the NVO to target individuals who are more likely to respond, increasing the overall response rate.
+
+## 2.
+
+Once a classifier is built, the National Veterans Organization (NVO) can use it to predict the likelihood of potential donors responding to their mailings. Figuring out which variables contribute to a person being more likely to respond enables the organization to optimize their outreach efforts. If the classifier is accurate, this approach can lead to a higher response rate and a more efficient allocation of resources compared to blanket mailings. Additionally, by relying on data-driven predictions, the NVO can minimize biases or assumptions that might have influenced their previous outreach strategies. Having a more systematic and objective method to identify potential donors could lead to the NVO collecting more donations while also reducing the cost of outreach.
+
+## 3.
+
+To evaluate the classifiers performance I will look at several measures from the confusion matrix: precision, sensitivity and the F-measure. The precision of the classifier will tell me the proportion of the positive response predictions that are actually true. Sensitivity will indicate how well the classifier can detect positive responses overall. The F-measure is number derived from precision and sensitivity. By focusing on these metrics, NVO can ensure that they're both maximizing the number of donation opportunities and ensuring that their outreach efforts are effective.
+
+```{r}
+# Import the data, and view
+donors <- read_csv("donors.csv")
+str(donors)
+summary(donors)
+
+# Compute the number and percentage of NAs for each column
+na_summary <- donors %>%
+  summarise_all(~sum(is.na(.))) %>%
+  gather(column, na_count) %>%
+  mutate(na_percentage = (na_count / nrow(donors)) * 100) %>%
+  filter(na_count > 1)
+print(na_summary)
+
+```
+
+```{r}
+# Drop number of children
+donors <- donors %>% select(-numberChildren) %>%
+  na.omit(donors)
+  
+```
+
+87% of the data in `numberChildren` is missing, so I dropped it due to it not being useful as a predictor. Since we have such a large amount of data I have decided to drop every record which has missing values. There is a lot of missing data, but even after omitting every incomplete record we still have 33230 observations to work with.
+
+```{r}
+# Change categorical types to factor variables
+donors <- donors %>%
+  mutate_at(vars(incomeRating, wealthRating, socioEconomicStatus, 
+                 gender, state, urbanicity, respondedMailing), .funs=factor)
+
+# Remove rows where respondedMailing or any numeric column is NA
+donors_num_cleaned <- donors %>%
+  filter(!is.na(respondedMailing)) %>%
+  select(age, mailOrderPurchases, 
+         totalGivingAmount, numberGifts, smallestGiftAmount, largestGiftAmount, 
+         averageGiftAmount, yearsSinceFirstDonation, monthsSinceLastDonation, 
+         respondedMailing) %>%
+              na.omit()
+```
+
+```{r}
+## Histogram Plots
+
+# Set a transparent theme for better visualization
+transparentTheme(trans = 0.9)
+
+# Create Histogram plots
+featurePlot(x = donors_num_cleaned %>% select(-respondedMailing),
+            y = donors_num_cleaned$respondedMailing,
+            plot = "density",
+            scale = list(x = list(relation='free'),
+                         y = list(relation='free')),
+            adjust = 1.5,
+            pch = "|",
+            layout = c(3,4),
+            auto.key = list(columns = 2))
+
+
+```
+
+```{r}
+# Boxplots
+caret::featurePlot(x = donors_num_cleaned %>% select(-respondedMailing),
+                   y = donors_num_cleaned$respondedMailing,
+                   plot = "box",
+                   scales = list(y = list(relation='free'),
+                                 x = list(rot=90)),
+                   layout = c(3,4),
+                   auto.key = list(columns = 2))
+```
+
+```{r}
+# Association between wealth and income ratings
+table(donors$incomeRating, donors$wealthRating)
+
+vcd::assocstats(table(donors$incomeRating, donors$wealthRating))
+```
+
+I suspected there would be a relationship between `incomeRating` and `wealthRating`. A Cramer's V value of 0.202 indicates that there is a weak to moderate relationship between these two variables. I am going to leave them both in.
+
+```{r}
+# Look for correlation between numeric variables
+
+donors %>%
+  keep(is.numeric) %>%
+  cor(use = "pairwise.complete.obs") %>%
+  corrplot::corrplot()
+```
+
+We see positive correlation between `averageGiftAmount` with both `largestGiftAmount` and `smallestGiftAmount`. There's also positive correlation between `yearsSinceFirstDonation` and `numberGifts`. These are all medium strength correlations, so for now I will leave them in.
+
+## 4. Build a logistic LASSO model using cross-validation on the training data to select the best 𝞴. View the coefficients at that chosen 𝞴 and see what features are in the model.
+
+```{r}
+
+# Creating dummy variables from categorical variables
+donors <- dummy_cols(donors, select_columns = c("incomeRating", "wealthRating", "socioEconomicStatus",
+                                                "gender", "state", "urbanicity"),
+                     remove_selected_columns = TRUE) %>%
+  select(-incomeRating_1, -wealthRating_0, -socioEconomicStatus_average, -gender_joint, -gender_male,
+         -state_AA, -state_AA, -urbanicity_rural)
+
+# Scaling numerical variables
+numerical_vars <- c('age', 'mailOrderPurchases', 'totalGivingAmount', 
+                     'numberGifts', 'smallestGiftAmount', 'largestGiftAmount', 'averageGiftAmount', 
+                     'yearsSinceFirstDonation', 'monthsSinceLastDonation')
+
+donors[numerical_vars] <- scale(donors[numerical_vars])
+
+# Partition the data.
+set.seed(1001)
+samp = createDataPartition(donors$respondedMailing, p = 0.7, list = FALSE)
+training = donors[samp, ]
+testing = donors[-samp, ]
+rm(samp)
+
+#check for class imbalance
+training %>%
+  select(respondedMailing) %>%
+  table() %>%
+  prop.table()
+```
+
+There is a significant class imbalance, I will use smote to correct it.
+
+```{r}
+# Smote 
+
+smote_train = smote(respondedMailing ~ .,
+                    data = training)
+
+table(smote_train$respondedMailing)
+```
+
+```{r}
+
+# Separate predictors and response
+y <- as.vector(smote_train$respondedMailing)
+X <- as.matrix(smote_train %>% select(-respondedMailing))
+
+# Use cross-validation to find the best lambda
+cv.lasso <- cv.glmnet(X, y, family="binomial", alpha=1)
+
+# Extract best lambda
+best_lambda <- cv.lasso$lambda.1se
+
+# Fit the model using the best lambda
+LASSO_model <- glmnet(X, y, family="binomial", alpha=1, lambda=best_lambda, maxit = 1e6)
+
+# View the coefficients
+coef(LASSO_model)
+
+```
+
+At the chosen 𝞴 = .0091, the features in our model are: `age`, `largestGiftAmount`, `averageGiftAmount`, `monthsSinceLastDonation`, `inHouseDonor`, `incomeRating_4`, `incomeRating_5`, `incomeRating_6`, `incomeRating_7`, `wealthRating_3`, `wealthRating_4`, `wealthRating_5`, `wealthRating_6`, `wealthRating_7`, `wealthRating_8`, `wealthRating_9`, `socioEconomicStatus_lowest,` `gender_female`, `state_AE`, `state_AL`, `state_CA`, `state_GA`, `state_ID`, `state_IN`, `state_MN`, `state_MS`, `state_NE`, `state_OK`, `state_SC`, `state_SD`, `state_WI`, `state_WV`, `state_WY`, `urbanicity_city`, `urbanicity_suburb`.
+
+```{r}
+# Build a decision tree model. Crossvalidate and tune over values of cp.
+set.seed(1001)
+ctrl = caret::trainControl(method = "repeatedcv", number = 5, repeats = 30)
+tree_model = caret::train(respondedMailing ~ ., 
+             data = smote_train, 
+             method = "rpart",
+             metric = "Kappa",
+             trControl = ctrl,
+             tuneGrid = expand.grid(cp = seq(0.0, 0.1, 0.005)))
+
+bestCp <- tree_model$bestTune$cp
+
+# Plot the cp
+plot(tree_model)
+```
+
+```{r}
+# Train the regression tree model using the best cp value
+tree_model <- rpart(respondedMailing ~ ., data = smote_train, control = rpart.control(cp = bestCp))
+
+rpart.plot::rpart.plot(tree_model)
+
+```
+
+The decision tree uses the features: `gender_female`, `urbanicity_suburb`, `state_MN`, `state_OK`, `state_CA`, `state_GA`, `state_AL`, `wealthRating_7`.
+
+```{r}
+test_predictors = as.matrix(testing %>% select(-respondedMailing))
+
+# Performance of LASSO
+LASSO_test_class = predict(LASSO_model, newx = test_predictors, s = best_lambda, type="class")
+LASSO_test_prob = predict(LASSO_model, newx = test_predictors, s = best_lambda, type="response")[,1]
+
+# Performance of tree
+tree_test_class = predict(tree_model, newdata = as.data.frame(test_predictors), type="class")
+tree_test_prob = predict(tree_model, newdata = as.data.frame(test_predictors), type="prob")[,1]
+```
+
+```{r}
+# Confusion Matrices
+response_vector <- as.vector(testing$respondedMailing)
+
+LASSO_cm = confusionMatrix(factor(LASSO_test_class), factor(response_vector), positive = "TRUE")
+tree_cm = confusionMatrix(factor(tree_test_class), factor(response_vector), positive = "TRUE")
+```
+
+```{r}
+LASSO_cm
+```
+
+```{r}
+tree_cm
+```
+
+```{r}
+tree_roc = roc(testing$respondedMailing ~ tree_test_prob,
+                plot=TRUE, print.auc=TRUE, print.auc.y=0.3,
+                col = "black", lwd=3, legacy.axes=TRUE)
+```
