@@ -1,0 +1,205 @@
+---
+title: "Problem Set 6"
+format: html
+editor: visual
+---
+
+```{r}
+#| message: false
+rm(list = ls())
+library(tidyverse)
+library(caret)
+library(performanceEstimation)
+library(PRROC)
+library(rpart)
+```
+
+```{r}
+#| message: false
+# Read in data and remove unneccessary features
+bank = read_csv("UniversalBank.csv") %>%
+  select(-ID, -`ZIP Code`, -Experience) %>%
+  rename(Loan = `Personal Loan`,
+         Securities = `Securities Account`,
+         CD = `CD Account`) %>%
+  mutate_at(vars(Loan, Education), .fun = factor)
+
+```
+
+```{r}
+# MISSING DATA
+# =============
+# Calculate percent of missing values for features
+missing_df =  as.numeric(purrr::map(bank, ~mean(is.na(.))))*100
+# Assign values to data frame for easy viewing
+df = data.frame(PercentMissing = missing_df,
+                row.names = names(bank)) %>%
+  arrange(desc(PercentMissing))
+
+print(df)
+```
+
+Fortunately, we don't have any missing values.
+
+## Partition Data
+
+```{r}
+# Partition the Data
+set.seed(453)
+samp = createDataPartition(bank$Loan, p = 0.7, list = FALSE)
+train = bank[samp, ]
+test = bank[-samp, ]
+rm(samp)
+```
+
+#### Address Class Imbalance
+
+```{r}
+# Address class imbalance
+table(train$Loan)
+```
+
+```{r}
+balanced_train = smote(Loan ~ .,
+              data = train,
+              perc.over = 6,
+              perc.under = 1.5)
+table(balanced_train$Loan)
+```
+
+## Best Tuned Decision Tree
+
+```{r}
+# training and evaluation
+ctrl = caret::trainControl(method = "repeatedcv", number = 7, repeats = 15)
+set.seed(890)
+tree = caret::train(Loan ~ .,
+             data = balanced_train,
+             method = "rpart",
+             metric = "Kappa",
+             trControl = ctrl,
+             tuneGrid = expand.grid(cp = seq(0.0, 0.1, 0.001)),
+             control = rpart.control(minsplit = 1, minbucket = 1, maxdepth = 8)
+             )
+```
+
+```{r}
+rpart.plot::rpart.plot(tree$finalModel)
+```
+
+## Best Tuned Random Forest
+
+```{r}
+# set.seed(285)
+# forest = caret::train(Loan ~ .,
+#                       data = balanced_train,
+#                       method = "rf",
+#                       metric = "Kappa",
+#                       trControl = ctrl,
+#                       ntree = 500,
+#                       tuneGrid = expand.grid(.mtry = seq(2,8,1))
+#                       )
+# saveRDS(forest, "forest.rds")
+forest = readRDS("forest.rds")
+plot(forest)
+```
+
+## Best Tuned Boosting (Adaboost / Gradient Boosting)
+
+```{r}
+# boost_grid = expand.grid(
+#   maxdepth = c(2, 3, 4, 5, 6, 7, 8),
+#   iter = c(100, 150, 200, 250, 300),
+#   nu = 0.1
+# )
+# 
+# boost_ctrl = caret::trainControl(method = "cv",
+#                           number = 10,
+#                           allowParallel = TRUE)
+# 
+# set.seed(623)
+# boosted_trees = caret::train(Loan ~ .,
+#                       data = balanced_train,
+#                       trControl = boost_ctrl,
+#                       tuneGrid = boost_grid,
+#                       method = "ada",
+#                       metric = "Kappa")
+
+# saveRDS(boosted_trees, "boosted_trees.rds")
+boosted_trees = readRDS("boosted_trees.rds")
+```
+
+```{r}
+plot(boosted_trees)
+```
+
+## Compare Precision and Sensitivity
+
+```{r}
+# Convert Y in test data to numeric 0, 1.
+test = mutate(test, Loan = as.numeric(ifelse(Loan=="1", 1, 0)))
+
+# Create explainers
+tree_explain = DALEX::explain(tree,
+                              data = test,
+                              y = test$Loan,
+                              type = "classification",
+                              label = "Decision Tree")
+
+forest_explain = DALEX::explain(forest,
+                                data = test,
+                                y = test$Loan,
+                                label = "Random Forest")
+
+adaboost_explain = DALEX::explain(boosted_trees,
+                                  data = test,
+                                  y = test$Loan,
+                                  label = "AdaBoost")
+```
+
+## ROC Plot and Comparing AUC
+
+```{r}
+# Model Performance
+tree_perf = DALEX::model_performance(tree_explain)
+forest_perf = DALEX::model_performance(forest_explain)
+adaboost_perf = DALEX::model_performance(adaboost_explain)
+
+# Plot the Precision Recall Curve
+plot(tree_perf, forest_perf, adaboost_perf, geom = 'prc')
+```
+
+Random Forest performed the best, with both high precision and high recall. Adaboost did slightly worse, but overall still performed well. The decision tree was clearly the worst, as the graph shows a significant drop in precision and recall compared to the other models.
+
+```{r}
+# Plot the ROC
+plot(tree_perf, forest_perf, adaboost_perf, geom = 'roc')
+```
+
+```{r}
+# Compare the AUCs
+matrix(c("Model",
+         "Decision Tree",
+         "Random Forest",
+         "Adaboost",
+         "AUC",
+         round(tree_perf$measures$auc, 5),
+         round(forest_perf$measures$auc, 5),
+         round(adaboost_perf$measures$auc, 5)),
+       ncol = 2
+         )
+```
+
+Again, it appears Random Forest performed the best as it had the largest AUC. However, for practical purposes it is essentially the same as Adaboost. Decision Tree was also clearly the worse, again.
+
+## Importance of partitioning
+
+Partitioning the data means randomly splitting our customer records into two sets: a training set and a testing set. This happens randomly, so there shouldn't be significant differences between the features of the customers in one set versus the other. Splitting the records up randomly is important because, for example, if we trained our model solely on low-income customers we may not get good predictions for high-income customers, and vice versa. Once the was partitioned, we could create our models to predict whether or not customers will accept a loan.
+
+The models were trained solely on the training dataset. During training, the models would "practice" predicting outcomes for customers in the training dataset, and that is how they would learn. However, these practice tests couldn't necessarily tell us how the model would perform on customer records that weren't used in training. In the real world our models will be used on new customer data, and that is why we must evaluate our models on data it hasn't seen before. That is why it is so important we don't feed all of our data into training the model: we need a separate testing set which is left out of training to get an idea how it will actually perform on new customers.
+
+## Value of bagging and ensemble models
+
+As we've seen, regular decision trees can be outperformed by more sophisticated models. Bagging, which is short for "bootstrap aggregation" allows us to train many models at once by creating random subsets of the training data to work with. When a record from the training set is randomly chosen to be part of a new training subset, it can be resampled and become part of other training subsets. By resampling records we can create many subsets of the training data, and try to make predictions using each of them. Once we have models trained on these subsets, we aggregate their output and see which outcome had more "votes." Basically, instead of one prediction, i.e. accepting or rejecting the loan, we have a whole list of predictions and see which category had more votes.
+
+Ensemble methods such as random forest and adaboost combine different types of models together, whereas bagging relies on many instances of the same model. The advantage of ensemble methods is that we can take advantage of the strengths of different models. The result is better predictions, which we can see in our own implementation: the ensemble methods are clearly superior.
