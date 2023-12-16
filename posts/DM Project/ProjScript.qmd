@@ -1,0 +1,839 @@
+---
+title: "Traffic Accidents in the Twin Cities Before and After COVID"
+Author: "Joe Penders"
+format: html
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+rm(list = ls())
+options(scipen=999)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(reshape2)
+library(corrplot)
+library(rpart)
+library(caret)
+library(AppliedPredictiveModeling)
+library(DALEX)
+library(ggthemes)
+library(pROC)
+library(performanceEstimation)
+library(glmnet)
+library(fastDummies)
+library(sf)
+library(gbm)
+library(pscl)
+library(patchwork)
+library(gridExtra)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# read in the data
+# US_Accidents_March23 <- read_csv("US_Accidents_March23.csv")
+
+# subset Minnesota
+# mn <- US_Accidents_March23 %>%
+# filter(State == "MN")
+# write_csv(mn, "mn.csv")
+# mn <- read_csv("mn.csv")
+# mn <- mn %>% select(-"ID", -"Source", -"State", -"Country")
+
+# subset counties in the Twin Cities metro area
+# met <- mn %>%
+#  filter(County %in% c('Anoka', 'Carver', 'Dakota', 'Hennepin', 'Ramsey',
+#                       'Scott', 'Washington'))
+# write_csv(met, "met.csv")
+met = read_csv("met.csv")
+
+# Sample 1000 random rows for testing purposes
+# met_1k <- met %>% sample_n(1000)
+# write_csv(met_1k, "met_1k.csv")
+
+# Load the shapefile for streets
+streets <- st_read("streets/STREETS_LOAD.shp")
+
+# Load the shape file for county boundaries
+counties <- st_read("counties/mn_county_boundaries_1000.shp")
+```
+
+This dataset contains records of traffic accidents for the seven-county region overseen by the metropolitan council of the Twin Cities. 
+
+Traffic Accident data source: Sobhan Moosavi. (2023). <i>US Accidents (2016 - 2023)</i> [Data set]. Kaggle. https://doi.org/10.34740/KAGGLE/DS/199387
+
+Minnesota shape files came from https://gisdata.mn.gov/organization/us-mn-state-dot
+
+```{r, include=FALSE}
+# Creating New Variables
+# Create COVID variable
+met$post_covid <- ifelse(met$Start_Time < as.POSIXct("2020-03-01", tz = "UTC-6"), 
+                      0, 1)
+
+# Day of week variable (0 = Sunday, 6 = Saturday)
+met$Day_of_Week <- as.integer(format(met$Start_Time, "%w"))
+
+# Create the binary 'weekday' variable (1 for weekdays, 0 for weekends)
+met$is_weekday <- ifelse(met$Day_of_Week >= 1 & met$Day_of_Week <= 5, 1, 0)
+
+# Month variable
+met$Month <- as.integer(format(met$Start_Time, "%m"))
+
+# Create the 'season' variable
+met$season <- ifelse(met$Month %in% c(3, 4, 5), "Spring",
+                ifelse(met$Month %in% c(6, 7, 8), "Summer",
+                  ifelse(met$Month %in% c(9, 10, 11), "Autumn",
+                    "Winter")))
+
+# Create rush hour variable
+# Extract hour from the Start_Time column
+met$start_hour <- as.integer(format(met$Start_Time, "%H"))
+
+# rush hour variable, 1 if the hour is between 6 and 9 or between 15 and 18 on weekdays, 0 otherwise
+met$rush_hr <- ifelse(met$is_weekday == 1 & (met$start_hour >= 6 & met$start_hour <= 9 | met$start_hour >= 15 & met$start_hour <= 18), 1, 0)
+
+# Drop no longer needed variables
+met$Day_of_Week <- NULL
+met$Month <- NULL
+```
+
+```{r, include=FALSE}
+# Convert the data frame to an sf object
+met_sf <- st_as_sf(met, coords = c("Start_Lng", "Start_Lat"), crs = 4326, agr = "constant")
+
+# Check the CRS for both datasets
+crs_streets <- st_crs(streets)
+crs_met <- st_crs(met_sf)
+
+# Transform the projection of the accidents data to match the streets data, if different
+if (crs_streets$epsg != crs_met$epsg) {
+  met_sf <- st_transform(met_sf, crs_streets)
+}
+
+# Remove extra dimensions from spatial data
+streets <- sf::st_zm(streets)
+counties <- sf::st_zm(counties)
+met_sf <- sf::st_zm(met_sf)
+```
+
+This dataset contains records of traffic accidents for the seven-county region overseen by the metropolitan council of the Twin Cities. Minnesota shape files came from https://gisdata.met.gov/dataset/trans-roads-metdot-tis
+
+The variables are:
+
+`ID`: This is a unique identifier of the accident record.
+
+`Source`: Source of raw accident data
+
+`Severity`: Shows the severity of the accident, a number between 1 and 4, where 1 indicates the least impact on traffic (i.e., short delay as a result of the accident) and 4 indicates a significant impact on traffic (i.e., long delay).
+
+`Start_Time`: Shows start time of the accident in local time zone.
+
+`End_Time`: Shows end time of the accident in local time zone. End time here refers to when the impact of accident on traffic flow was dismissed.
+
+`Start_Lat`: Shows latitude in GPS coordinate of the start point.
+
+`Start_Lng`: Shows longitude in GPS coordinate of the start point.
+
+`End_Lat`: Shows latitude in GPS coordinate of the end point.
+
+`End_Lng`: Shows longitude in GPS coordinate of the end point.
+
+`Distance(mi)`: The length of the road extent affected by the accident in miles.
+
+`Description`:  Shows a human provided description of the accident.
+
+`Street`: Shows the street name in address field.
+
+`City`: Shows the city in address field.
+
+`County`: Shows the county in address field.
+
+`State`: Shows the state in address field.
+
+`Zipcode`: Shows the zipcode in address field.
+
+`Country`: Shows the country in address field.
+
+`Timezone`: Shows timezone based on the location of the accident (eastern, central, etc.).
+
+`Airport_Code`: Denotes an airport-based weather station which is the closest one to location of the accident.
+
+`Weather_Timestamp`:Shows the time-stamp of weather observation record (in local time).
+
+`Temperature(F)`: Shows the temperature (in Fahrenheit).
+
+`Wind_Chill(F)`: Shows the wind chill (in Fahrenheit).
+
+`Humidity(%)`: Shows the humidity (in percentage).
+
+`Pressure(in)`: Shows the air pressure (in inches).
+
+`Visibility(mi)`: Shows visibility (in miles).
+
+`Wind_Direction`: Shows wind direction.
+
+`Wind_Speed(mph)`: Shows wind speed (in miles per hour).
+
+`Precipitation(in)`: Shows precipitation amount in inches, if there is any.
+
+`Weather_Condition`: Shows the weather condition (rain, snow, thunderstorm, fog, etc.)
+
+`Amenity`: A POI annotation which indicates presence of amenity in a nearby location.
+
+`Bump`: A POI annotation which indicates presence of speed bump or hump in a nearby location.
+
+`Crossing`: A POI annotation which indicates presence of crossing in a nearby location.
+
+`Give_Way`: A POI annotation which indicates presence of give_way in a nearby location.
+
+`Junction`: A POI annotation which indicates presence of junction in a nearby location.
+
+`No_Exit`: A POI annotation which indicates presence of no_exit in a nearby location.
+
+`Railway`: A POI annotation which indicates presence of railway in a nearby location.
+
+`Roundabout`: A POI annotation which indicates presence of roundabout in a nearby location.
+
+`Station`: A POI annotation which indicates presence of station in a nearby location.
+
+`Stop`: A POI annotation which indicates presence of stop in a nearby location.
+
+`Traffic_Calming`: A POI annotation which indicates presence of traffic_calming in a nearby location.
+
+`Traffic_Signal`: A POI annotation which indicates presence of traffic_signal in a nearby location.
+
+`Turning_Loop`: A POI annotation which indicates presence of turning_loop in a nearby location.
+
+`Sunrise_Sunset`: Shows the period of day (i.e. day or night) based on sunrise/sunset.
+
+`Civil_Twilight`: Shows the period of day (i.e. day or night) based on civil twilight.
+
+`Nautical_Twilight`: Shows the period of day (i.e. day or night) based on nautical twilight.
+
+`Astronomical_Twilight`: Shows the period of day (i.e. day or night) based on astronomical twilight.
+
+`covid`: indicates if accident occurred before COVID or during/after COVID (March 2020)
+
+```{r}
+# Creating New Variables
+# Create COVID variable
+met$post_covid <- ifelse(met$Start_Time < as.POSIXct("2020-03-01", tz = "UTC-6"), 
+                      0, 1)
+
+# Day of week variable (0 = Sunday, 6 = Saturday)
+met$Day_of_Week <- as.integer(format(met$Start_Time, "%w"))
+
+# Create the binary 'weekday' variable (1 for weekdays, 0 for weekends)
+met$is_weekday <- ifelse(met$Day_of_Week >= 1 & met$Day_of_Week <= 5, 1, 0)
+
+# Month variable
+met$Month <- as.integer(format(met$Start_Time, "%m"))
+
+# Create the 'season' variable
+met$season <- ifelse(met$Month %in% c(3, 4, 5), "Spring",
+                ifelse(met$Month %in% c(6, 7, 8), "Summer",
+                  ifelse(met$Month %in% c(9, 10, 11), "Autumn",
+                    "Winter")))
+
+# Create rush hour variable
+# Extract hour from the Start_Time column
+met$start_hour <- as.integer(format(met$Start_Time, "%H"))
+
+# rush hour variable, 1 if the hour is between 6 and 9 or between 15 and 18 on weekdays, 0 otherwise
+met$rush_hr <- ifelse(met$is_weekday == 1 & (met$start_hour >= 6 & met$start_hour <= 9 | met$start_hour >= 15 & met$start_hour <= 18), 1, 0)
+
+# Drop no longer needed variables
+met$Day_of_Week <- NULL
+met$Month <- NULL
+```
+
+# Looking at accident before and after COVID
+
+```{r fig.width=12, fig.height=12}
+# Get the bounding box of the accidents data
+bbox_met <- st_bbox(met_sf)
+
+# map
+ggplot() +
+  geom_sf(data = streets) + 
+  geom_sf(data = counties, color = "green4", fill = NA, size = 5) +
+  geom_sf(data = met_sf, aes(color = factor(post_covid)), size = .8, alpha = .5) +
+  scale_color_manual(
+    values = c("0" = "#0066FF", "1" = "red"),
+    name = "COVID Period",
+    labels = c("0" = "Pre-COVID", "1" = "Post-COVID")
+  ) +
+  geom_sf_label(data = counties, aes(label = CTY_NAME), size = 4, color = "green4") +
+  coord_sf(xlim = bbox_met[c('xmin', 'xmax')], ylim = bbox_met[c('ymin', 'ymax')], expand = FALSE) +
+  ggtitle("Locations of Traffic Accidents in Twin Cities (June 2016 through March 2023)") +
+  theme(
+    plot.title = element_text(size = rel(1.5)),
+    axis.title.x = element_blank(), 
+    axis.title.y = element_blank(),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14)) +
+  guides(color = guide_legend(override.aes = list(size = 5)))
+```
+It appears that after COVID, a greater proportion of accidents may be happening in the suburbs as fewer people commute to the core cities. Indeed, pre-COVID 72.2% of accidents in the metro occurred in just Hennepin and Ramsey counties, while post-COVID the proportion was down to 69.1%
+
+
+```{r, include=FALSE}
+# Filter data for Ramsey and Hennepin counties (Twin Cities)
+TC <- met %>%
+  filter(County %in% c("Ramsey", "Hennepin"))
+
+# Group by post_covid and calculate the counts for the Twin Cities
+TC_grouped <- TC %>%
+  group_by(post_covid) %>%
+  summarise(total_TC_accidents = n())
+
+# Calculate the total accidents pre and post COVID for the entire dataset
+total_metro_accidents <- met %>%
+  group_by(post_covid) %>%
+  summarise(total_metro_accidents = n())
+
+# Join to get proportions
+proportions <- left_join(TC_grouped, total_metro_accidents, by = "post_covid") %>%
+  mutate(proportion = total_TC_accidents / total_metro_accidents)
+
+# Display the result
+print(proportions)
+
+```
+
+```{r, fig.width=10, fig.height=10}
+# Filter accidents pre-covid
+accidents_pre_covid <- met %>%
+  filter(post_covid == 0)
+
+# Filter accidents post-covid
+accidents_post_covid <- met %>%
+  filter(post_covid == 1)
+
+# Get the count of accidents for each street pre-covid
+top20_pre_covid <- accidents_pre_covid %>%
+  count(Street) %>% 
+  top_n(20, n)
+
+# Get the count of accidents for each street post-covid
+top20_post_covid <- accidents_post_covid %>%
+  count(Street) %>% 
+  top_n(20, n) 
+
+# Find the maximum number of accidents to set the same x-axis limit for both plots
+max_accidents <- max(c(top20_pre_covid$n, top20_post_covid$n))
+
+# Pre-COVID plot
+plot_pre_covid <- ggplot(top20_pre_covid, aes(x = reorder(Street, n), y = n)) +
+  geom_bar(stat = "identity", fill = "#0066FF") +
+  geom_text(aes(label = Street), vjust = 0.4, hjust = -0.2, color = "black", size = 3.0) +
+  coord_flip() +
+  labs(title = "Top 20 Streets by Number of Accidents (Pre-COVID)", x = NULL, y = NULL) +
+  ylim(0, max_accidents) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 0),  # Adjust here for horizontal labels
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank()
+  )
+
+
+# Post-COVID plot
+plot_post_covid <- ggplot(top20_post_covid, aes(x = reorder(Street, n), y = n)) +
+  geom_bar(stat = "identity", fill = "red") +
+  geom_text(aes(label = Street), vjust = 0.4, hjust = -0.2, color = "black", size = 3.0) +
+  coord_flip() +
+  labs(title = "Top 20 Streets by Number of Accidents (Post-COVID)", x = NULL, y = "Number of Accidents") +
+  ylim(0, max_accidents) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 0),  # Adjust here for horizontal labels
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank()
+  )
+
+# Align the plots vertically
+grid.arrange(plot_pre_covid, plot_post_covid, ncol = 1)
+
+```
+
+These counts by street are for the entire periods of June 2016 through February 2020, and March 2020 through March 2023, pertaining to the pre and post COVID periods, respectively. This means there are 45 months worth of data for the pre-COVID period and 37 months of data for the post-COVID period.
+
+
+```{r fig.width=10, fig.height=4, warning=FALSE, message=FALSE}
+# Get weekly incidents by season
+weekly_incidents_by_season <- met %>%
+  mutate(Week = as.Date(floor_date(Start_Time, "week"))) %>%
+  group_by(Week, season, post_covid) %>%
+  summarise(Incidents = n(), .groups = 'drop') %>%
+  ungroup() %>%
+  arrange(Week, season, post_covid)
+
+# Reorder the 'season' variable
+weekly_incidents_by_season$season <- factor(weekly_incidents_by_season$season, 
+                                            levels = c("Spring", "Summer", "Autumn", "Winter"))
+
+# Define date limits for the plot
+start_date <- as.Date("2016-06-01")
+end_date <- as.Date("2023-03-31")  
+
+# Plot
+ggplot(weekly_incidents_by_season, aes(x = Week, y = Incidents)) +
+  geom_segment(aes(xend = lead(Week), yend = lead(Incidents), color = season), size = .5) +
+  scale_color_manual(name = "Season", 
+                     values = c("Spring" = "green", "Summer" = "red", 
+                                "Autumn" = "orange", "Winter" = "blue")) +
+  ggtitle("Weekly Accident Rate in the Twin Cities Metro") +
+  xlab("") +
+  ylab("Number of Accidents") +
+  scale_x_date(date_breaks = '1 month', date_labels = "%b %Y",
+               limits = c(start_date, end_date),
+               expand = c(0, 0)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5, size = rel(0.8))) +
+  geom_smooth(data = subset(weekly_incidents_by_season, post_covid == 0),
+              aes(x = Week, y = Incidents, linetype = "Pre-Covid"), 
+              method = "lm", se = FALSE, color = "darkgray") +
+   geom_smooth(data = subset(weekly_incidents_by_season, post_covid == 1),
+              aes(x = Week, y = Incidents, linetype = "Post-Covid"), 
+              method = "lm", se = FALSE, color = "black") +
+   scale_linetype_manual(name = "Trend Lines",
+                        values = c("Pre-Covid" = "dashed", "Post-Covid" = "dashed"),
+                        labels = c("Pre-Covid", "Post-Covid"),
+                        guide = guide_legend(override.aes = list(color = c("Pre-Covid" = "darkgray",   "Post-Covid" = "black"))))
+
+```
+The weekly accident rate was trending upwards pre-COVID, but there's a noticable shift during the post-COVID period as the trend seems to flatten out while the seasonality becomes more pronounced.
+
+
+```{r}
+# Create data frames with counts of incidents for each hour, pre and post Covid
+hourly_incidents_pre_covid <- met %>%
+  filter(post_covid == 0) %>%
+  group_by(start_hour) %>%
+  summarise(Count = n())
+
+hourly_incidents_post_covid <- met %>%
+  filter(post_covid == 1) %>%
+  group_by(start_hour) %>%
+  summarise(Count = n())
+
+# Combine the data
+combined_hourly_incidents <- bind_rows(
+  mutate(hourly_incidents_pre_covid, Period = "Pre-Covid"),
+  mutate(hourly_incidents_post_covid, Period = "Post-Covid")
+)
+
+# Convert 'Period' to a factor with levels in the desired order
+combined_hourly_incidents$Period <- factor(combined_hourly_incidents$Period, 
+                                           levels = c("Pre-Covid", "Post-Covid"))
+
+# Line plot of incidents by hour of the day
+ggplot(combined_hourly_incidents, aes(x=start_hour, y=Count, color=Period)) +
+  geom_smooth(se=F, method = "loess", span = 0.2) + 
+  scale_color_manual(values=c("#0066FF", "red")) +  
+  ggtitle("Number of Accidents by Hour of the Day") +
+  xlab("Hour of the Day") +
+  ylab("Number of Accidents") +
+  theme_minimal() +
+  theme(legend.position="top")
+
+```
+
+Reminder: there are 45 months worth of data for the pre-COVID period and 37 months of data for the post-COVID period. I believe the length of these two periods are close enough for general comparison purposes, but it's important to note that all else being equal, there should be higher counts in the pre-COVID period. However, there are actually 65,459 accidents recorded post-COVID compared with only 56,054 pre-COVID.
+
+
+```{r, include = FALSE}
+met %>% 
+  group_by(post_covid) %>% 
+  summarise(count = n())
+```
+
+
+```{r}
+# Boxplots for length of road affected
+ggplot(met, aes(y = factor(post_covid, levels = c(1, 0)), x = `Distance(mi)`, fill = factor(post_covid, levels = c(1, 0)))) +
+  geom_boxplot(outlier.size = 1, orientation = "y") +
+  scale_fill_manual(values = c("red", "#0066FF")) +
+  scale_y_discrete(labels = c("1" = "Post-Covid", "0" = "Pre-Covid")) +
+  labs(title = "Length of Section of Road Affected When Accidents Occur",
+       y = "",
+       x = "Distance (mi)") +
+  theme_minimal() +
+  theme(
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
+  coord_cartesian(xlim = c(0, 2.5))
+```
+
+For each observed accident, the length in miles of the stretch of road that was affected was recorded. Before COVID, the median distance was 0 miles and the mean was 0.48 miles. After COVID, the median distance affected was 0.43 miles while the mean was 0.85 miles.
+
+
+```{r, include=FALSE}
+# Distance stats
+median_dist_pre_covid <- median(accidents_pre_covid$`Distance(mi)`, na.rm = TRUE)
+median_dist_post_covid <- median(accidents_post_covid$`Distance(mi)`, na.rm = TRUE)
+median_dist_difference <- median_dist_post_covid - median_dist_pre_covid
+cat("Median Distance Pre-COVID:", median_dist_pre_covid, "\n")
+cat("Median Distance Post-COVID:", median_dist_post_covid, "\n")
+
+mean_dist_pre_covid <- mean(accidents_pre_covid$`Distance(mi)`, na.rm = TRUE)
+mean_dist_post_covid <- mean(accidents_post_covid$`Distance(mi)`, na.rm = TRUE)
+mean_dist_difference <- mean_dist_post_covid - mean_dist_pre_covid
+cat("mean Distance Pre-COVID:", mean_dist_pre_covid, "\n")
+cat("mean Distance Post-COVID:", mean_dist_post_covid, "\n")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Converting logical types to binary numbers
+# Identifying logical columns
+logical_cols <- sapply(met, is.logical)
+
+# Converting logical columns to binary (0 and 1)
+met[, logical_cols] <- lapply(met[, logical_cols], as.integer)
+```
+
+```{r}
+# Select features of interest
+met_selected <- met %>%
+  select(Severity, rush_hr, is_weekday, season, post_covid,
+         County, `Temperature(F)`, `Humidity(%)`, `Visibility(mi)`, `Wind_Speed(mph)`,
+         `Precipitation(in)`, Amenity, Bump, Crossing, Give_Way, Junction, No_Exit,
+         Railway, Roundabout, Station, Stop, Traffic_Calming, Traffic_Signal,
+         Turning_Loop, season) %>%
+  mutate(
+    County = factor(County),
+    season = factor(season)) %>%
+  dummy_cols(select_columns = c("County", "season"), remove_selected_columns = TRUE)
+
+# Drop Spring season and Ramsey County
+met_selected$season_Spring <- NULL
+met_selected$County_Ramsey <- NULL
+```
+
+```{r}
+# Transform target variable
+met_selected <- met_selected %>%
+    mutate(severe = as.factor(ifelse(Severity %in% 1:2, 0, 1))) %>%
+    select(-Severity)
+```
+
+```{r}
+# Compute the number and percentage of NAs for each column
+na_summary <- met_selected %>%
+  summarise_all(~sum(is.na(.))) %>%
+  gather(column, na_count) %>%
+  mutate(na_percentage = (na_count / nrow(met)) * 100) %>%
+  filter(na_count > 1)
+print(na_summary)
+```
+
+```{r}
+# Remove NAs
+met_clean <- na.omit(met_selected)
+```
+
+
+```{r}
+# Scaling numerical variables, except for Start_Hour
+numerical_vars <- c("Temperature(F)", "Humidity(%)",
+         "Visibility(mi)", "Wind_Speed(mph)", "Precipitation(in)")
+
+met_clean[numerical_vars] <- scale(met_clean[numerical_vars])
+```
+
+```{r}
+# Partition the data.
+set.seed(720)
+samp = createDataPartition(met_clean$severe,
+                           p = 0.7,
+                           list = FALSE)
+train = met_clean[samp, ]
+test = met_clean[-samp, ]
+rm(samp)
+```
+
+```{r}
+# Check for class imbalance problems. 
+train %>%
+  select(severe) %>%
+  table() %>%
+  as.data.frame() %>%
+  mutate(Proportion = Freq / sum(Freq)) %>%
+  rename(Counts = Freq) %>%
+  t()
+```
+#SMOTE
+
+There is a class imbalance to address: only about 12% of observations were in the severe category.
+
+```{r}
+# Apply SMOTE to the training data to only oversample the minority class
+smoted <- performanceEstimation::smote(severe ~ ., data = train, 
+                                            perc.over = .7, k = 5, perc.under = 7)
+# Over/under values:
+# .3 and 21 gave 50883 and 10501
+
+# .5 and 11 gave 44429 and 12117
+  # Sensitivity: .439
+
+# .7 and 7 gave 39578 and 13732
+  # Sensitivity: .539
+
+# Checking the class distribution in the final dataset
+smoted %>%
+  select(severe) %>%
+  table() %>%
+  as.data.frame() %>%
+  mutate(Proportion = Freq / sum(Freq)) %>%
+  rename(Counts = Freq) %>%
+  t()
+```
+
+I used smote to generate additional records for the severe accidents, while downsampling the less severe accidents.
+
+#LASSO
+
+```{r}
+# LASSO
+# Separate predictors and response
+y <- as.vector(smoted$severe)
+X <- as.matrix(smoted %>% dplyr::select(-severe))
+
+# Use cross-validation to find the best lambda
+cv.lasso <- cv.glmnet(X, y, family="binomial", alpha=1, thresh=1e-7)
+
+# Extract best lambda
+best_lambda <- cv.lasso$lambda.1se
+
+# Fit the model using the best lambda
+LASSO_model <- glmnet(X, y, family="binomial", alpha=1, lambda=best_lambda,
+                      maxit = 1e6)
+
+# View the coefficients
+coef(LASSO_model)
+```
+
+```{r}
+# LASSO output
+test_predictors = as.matrix(test %>% dplyr::select(-severe))
+LASSO_test_class = predict(LASSO_model, newx = test_predictors, s = best_lambda, type="class")
+LASSO_test_prob = predict(LASSO_model, newx = test_predictors, s = best_lambda, type="response")[,1]
+
+LASSO_test_class_factor = factor(LASSO_test_class, levels = c("0", "1"))
+response_vector_factor = factor(test$severe, levels = c("0", "1"))
+
+# Create and print the confusion matrix
+LASSO_cm = confusionMatrix(LASSO_test_class_factor, response_vector_factor, positive = "1")
+
+# Calculate the F1 Score for LASSO
+precision_LASSO <- 0.8497 #PPV
+recall_LASSO <- 0.5856 #Sensitivity
+f1_score_LASSO <- 2 * (precision_LASSO * recall_LASSO) / (precision_LASSO + recall_LASSO)
+
+# Print the F1 Score for LASSO
+print("LASSO Results")
+print(LASSO_cm)
+print(paste("LASSO F1 Score:", f1_score_LASSO))
+```
+
+#Logistic Regression
+
+```{r}
+# Create subset with LASSO suggested variables
+lasso_rec <- smoted %>%
+  select(-"Bump", -"No_Exit", -"Railway", -"Roundabout", -"Traffic_Calming",
+         -"Turning_Loop", -"season_Summer")
+```
+
+
+```{r}
+# Fit the logistic regression model
+logistic_trained <- glm(severe ~ ., data = lasso_rec, family = "binomial")
+
+# View the summary of the model
+summary(logistic_trained)
+exp(coef(logistic_trained))
+pR2(logistic_trained)
+```
+
+
+```{r warning=FALSE}
+# Predict on test set for regular LOGISTIC REGRESSION
+predicted_probs_logit <- predict(logistic_trained, newdata = test, type = "response")
+threshold <- 0.5
+predicted_classes_logit <- ifelse(predicted_probs_logit > threshold, 1, 0)
+
+# Convert predicted_classes and actual classes to factors
+predicted_classes_factor_logit <- factor(predicted_classes_logit, levels = c("0", "1"))
+actual_classes_factor_logit <- factor(test$severe, levels = c("0", "1"))
+
+# Generate the confusion matrix
+confusion_matrix_logit <- confusionMatrix(predicted_classes_factor_logit,
+                                          actual_classes_factor_logit, positive = "1")
+
+# Calculate the F1 Score
+logit_precision <- 0.8402 #PPV
+logit_recall <- 0.5955 #Sensitivity
+f1_score_logit <- 2 * (logit_precision * logit_recall) /
+  (logit_precision + logit_recall)
+
+# Print the full confusion matrix summary and F1
+print("Regular Logistic Regression:")
+print(confusion_matrix_logit)
+print(paste("F1 Score:", f1_score_logit))
+
+```
+
+```{r}
+# Logit Explainer
+logit_explain = DALEX::explain(model = logistic_trained,
+                             data = test,
+                             y = as.numeric(test$severe=="1"),
+                             type = "classification",
+                             label = "Logit")
+```
+
+
+#GBM Model
+
+```{r}
+# Train a gradient boost model
+gbm_smoted <- smoted
+smoted$severe <- factor(gbm_smoted$severe, levels = c("0", "1"), labels = c("Level_0", "Level_1"))
+
+set.seed(469)
+#gbm_model = train(
+#  y = gbm_smoted$severe,
+#  x = select(gbm_smoted, -severe),
+#  method = "gbm",
+#  verbose = FALSE,
+#  trControl = trainControl(method = "repeatedcv", number = 5, repeats = 5, classProbs = TRUE),
+#  tuneLength = 10
+#)
+#saveRDS(gbm_model, "met_gbm.5.5.10.rds")
+gbm_model = readRDS("met_gbm.5.5.10.rds")
+plot(gbm_model)
+```
+
+
+```{r}
+# GBM Explainer
+gbm_explain = DALEX::explain(model = gbm_model,
+                             data = test,
+                             y = as.numeric(test$severe=="1"),
+                             type = "classification",
+                             label = "GBM")
+```
+
+# Random Forest
+
+```{r}
+# Train a random forest model
+#set.seed(776)
+#rf_model = train(
+#   y = smoted$severe,
+#   x = select(smoted, -severe),
+#   method = "rf",
+#   trControl = trainControl(method = "repeatedcv", number = 5, repeats = 5),
+#   tuneLength = 10
+# )
+
+#saveRDS(rf_model, "met_rf.5.5.10.rds")
+rf_model = readRDS("met_rf.5.5.10.rds")
+plot(rf_model)
+```
+
+```{r}
+rf_explain = DALEX::explain(model = rf_model,
+                            data = test,
+                            y = as.numeric(test$severe=="1"),
+                            type = "classification",
+                            label = "Random Forest")
+```
+
+
+# Performance
+
+```{r}
+# Performance of GBM and logistic regression
+logit_perf = DALEX::model_performance(logit_explain, cutoff = 0.5)
+gbm_perf = DALEX::model_performance(gbm_explain, cutoff = 0.5)
+rf_perf = DALEX::model_performance(rf_explain, cutoff = 0.5)
+
+
+print("GBM Performance")
+gbm_perf
+cat("\n")
+print("Logistic Regression Performance")
+logit_perf
+cat("\n")
+print("Random Forest Performance")
+rf_perf
+```
+
+```{r}
+roc = plot(logit_perf, gbm_perf, rf_perf, geom = "roc")
+prc = plot(logit_perf, gbm_perf, rf_perf, geom = "prc")
+
+roc + prc
+```
+
+```{r}
+gbm_mp = DALEX::model_parts(gbm_explain,
+                            B = 50)
+plot(gbm_mp)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

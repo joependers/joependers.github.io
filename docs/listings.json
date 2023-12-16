@@ -1,12 +1,14 @@
 [
   {
     "listing": "/projects.html",
-    "items": []
+    "items": [
+      "/projects/DM Project/ProjScript.html"
+    ]
   },
   {
     "listing": "/posts.html",
     "items": [
-      "/posts/Problem Set 6/Problem Set 6.html",
+      "/posts/Problem Set 6/index.html",
       "/posts/Problem Set 4/index.html",
       "/posts/Demo Post 2/index.html",
       "/posts/Demo Post 1/index.html"
