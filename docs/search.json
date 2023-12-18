@@ -60,7 +60,7 @@
     "href": "posts.html",
     "title": "Blog Posts",
     "section": "",
-    "text": "Problem Set 6\n\n\n\n\n\n\n\n\n\n\n \n\n\n\n\n  \n\n\n\n\nTraffic Accidents in the Twin Cities Before and After COVID\n\n\n\n\n\n\n\n\n\n\n \n\n\n\n\n  \n\n\n\n\nTraffic Accidents in the Twin Cities, Before and After COVID\n\n\n\n\n\n\n\n\n\n\n\n\nDec 9, 2023\n\n\nJoe Penders\n\n\n\n\n\n\n  \n\n\n\n\nPhase 2\n\n\n\n\n\n\n\n\n\n\n\n\nNov 25, 2023\n\n\nJoe Penders\n\n\n\n\n\n\n  \n\n\n\n\nProject Phase 1\n\n\n\n\n\n\n\n\n\n\n\n\nNov 5, 2023\n\n\nJoe Penders\n\n\n\n\n\n\n  \n\n\n\n\nProblem Set 4\n\n\n\n\n\n\n\n\n\n\n\n\nSep 30, 2023\n\n\nJoe Penders\n\n\n\n\n\n\nNo matching items"
+    "text": "Problem Set 6\n\n\n\n\n\n\n\n\n\n\n \n\n\n\n\n  \n\n\n\n\nProblem Set 4\n\n\n\n\n\n\n\n\n\n\n\n\nSep 30, 2023\n\n\nJoe Penders\n\n\n\n\n\n\nNo matching items"
   },
   {
     "objectID": "posts/Problem Set 3/index.html",
@@ -296,6 +296,41 @@
   {
     "objectID": "projects/DM Project/ProjScript.html#smote",
     "href": "projects/DM Project/ProjScript.html#smote",
+    "title": "Traffic Accidents in the Twin Cities Before and After COVID",
+    "section": "SMOTE",
+    "text": "SMOTE\nThere is a class imbalance to address: only about 12% of observations were in the severe category.\n\n# Apply SMOTE to the training data to only oversample the minority class\nsmoted &lt;- performanceEstimation::smote(severe ~ ., data = train, \n                                            perc.over = .7, k = 5, perc.under = 7)\n# Over/under values:\n# .3 and 21 gave 50883 and 10501\n\n# .5 and 11 gave 44429 and 12117\n  # Sensitivity: .439\n\n# .7 and 7 gave 39578 and 13732\n  # Sensitivity: .539\n\n# Checking the class distribution in the final dataset\nsmoted %&gt;%\n  select(severe) %&gt;%\n  table() %&gt;%\n  as.data.frame() %&gt;%\n  mutate(Proportion = Freq / sum(Freq)) %&gt;%\n  rename(Counts = Freq) %&gt;%\n  t()\n\n           [,1]        [,2]       \nsevere     \"0\"         \"1\"        \nCounts     \"39578\"     \"13732\"    \nProportion \"0.7424123\" \"0.2575877\"\n\n\nI used smote to generate additional records for the severe accidents, while downsampling the less severe accidents."
+  },
+  {
+    "objectID": "projects/DM Project/index.html",
+    "href": "projects/DM Project/index.html",
+    "title": "Traffic Accidents in the Twin Cities Before and After COVID",
+    "section": "",
+    "text": "This dataset contains records of traffic accidents for the seven-county region overseen by the metropolitan council of the Twin Cities.\nTraffic Accident data source: Sobhan Moosavi. (2023). US Accidents (2016 - 2023) [Data set]. Kaggle. https://doi.org/10.34740/KAGGLE/DS/199387\nMinnesota shape files came from https://gisdata.mn.gov/organization/us-mn-state-dot"
+  },
+  {
+    "objectID": "projects/DM Project/index.html#features-of-interest",
+    "href": "projects/DM Project/index.html#features-of-interest",
+    "title": "Traffic Accidents in the Twin Cities Before and After COVID",
+    "section": "Features of interest",
+    "text": "Features of interest\nFor my models I’m selecting the following variables to start:\nsevere: The original dataset measured the severity of accidents on a scale of 1 - 4, with 4 being the most severe. The source documentation indicates severity is based on the length of time traffic was impacted. I turned this into a binary variable with accidents measuring at a 3 or 4 on the original scale as ‘severe’.\nrush_hr: Computed binary variable for accidents which occured between 6 and 9 am or 3 and 6 pm.\nis_weekday: Binary variable indicating if addicent occured on weekday or not.\nseason: Spring, summer, fall, winter\npost_covid: binary variable, with post_covid being define as during or after March 1st, 2020.\nCounty: Shows the county in the address field.\nTemperature(F): Shows the temperature (in Fahrenheit).\nHumidity(%): Shows the humidity (in percentage).\nVisibility(mi): Shows visibility (in miles).\nWind_Speed(mph): Shows wind speed (in miles per hour).\nPrecipitation(in): Shows precipitation amount in inches, if there is any.\nAmenity: A POI (Point of Interest) annotation which indicates the presence of an amenity in a nearby location.\nBump: A POI annotation which indicates the presence of a speed bump or hump in a nearby location.\nCrossing: A POI annotation which indicates the presence of a crossing in a nearby location.\nGive_Way: A POI annotation which indicates the presence of a give_way sign in a nearby location.\nJunction: A POI annotation which indicates the presence of a junction in a nearby location.\nNo_Exit: A POI annotation which indicates the presence of a no_exit sign in a nearby location.\nRailway: A POI annotation which indicates the presence of a railway in a nearby location.\nRoundabout: A POI annotation which indicates the presence of a roundabout in a nearby location.\nStation: A POI annotation which indicates the presence of a station (such as a bus or train station) in a nearby location.\nStop: A POI annotation which indicates the presence of a stop sign in a nearby location.\nTraffic_Calming: A POI annotation which indicates the presence of traffic calming measures (such as speed humps) in a nearby location.\nTraffic_Signal: A POI annotation which indicates the presence of a traffic signal in a nearby location.\nTurning_Loop: A POI annotation which indicates the presence of a turning loop in a nearby location."
+  },
+  {
+    "objectID": "projects/DM Project/index.html#data-cleaning",
+    "href": "projects/DM Project/index.html#data-cleaning",
+    "title": "Traffic Accidents in the Twin Cities Before and After COVID",
+    "section": "Data cleaning",
+    "text": "Data cleaning\n\n# Compute the number and percentage of NAs for each column\nna_summary &lt;- met_selected %&gt;%\n  summarise_all(~sum(is.na(.))) %&gt;%\n  gather(column, na_count) %&gt;%\n  mutate(na_percentage = (na_count / nrow(met)) * 100) %&gt;%\n  filter(na_count &gt; 1)\nprint(na_summary)\n\n# A tibble: 5 × 3\n  column            na_count na_percentage\n  &lt;chr&gt;                &lt;int&gt;         &lt;dbl&gt;\n1 Temperature(F)         632         0.520\n2 Humidity(%)            722         0.594\n3 Visibility(mi)         617         0.508\n4 Wind_Speed(mph)       3590         2.95 \n5 Precipitation(in)    29028        23.9  \n\n\n\n# Remove NAs\nmet_clean &lt;- na.omit(met_selected)\n\n\n# Scaling numerical variables, except for Start_Hour\nnumerical_vars &lt;- c(\"Temperature(F)\", \"Humidity(%)\",\n         \"Visibility(mi)\", \"Wind_Speed(mph)\", \"Precipitation(in)\")\n\nmet_clean[numerical_vars] &lt;- scale(met_clean[numerical_vars])\n\nNumerical variables except for Start_Hour were scaled. NAs were removed because imputation seemed inappropriate given the large amount of missing data for Precipitation(in). The number of NAs for other features was very small."
+  },
+  {
+    "objectID": "projects/DM Project/index.html#partitioning-the-data-for-training-and-testing",
+    "href": "projects/DM Project/index.html#partitioning-the-data-for-training-and-testing",
+    "title": "Traffic Accidents in the Twin Cities Before and After COVID",
+    "section": "Partitioning the data for training and testing",
+    "text": "Partitioning the data for training and testing\n\n# Partition the data.\nset.seed(720)\nsamp = createDataPartition(met_clean$severe,\n                           p = 0.7,\n                           list = FALSE)\ntrain = met_clean[samp, ]\ntest = met_clean[-samp, ]\nrm(samp)\n\n\n# Check for class imbalance problems. \ntrain %&gt;%\n  select(severe) %&gt;%\n  table() %&gt;%\n  as.data.frame() %&gt;%\n  mutate(Proportion = Freq / sum(Freq)) %&gt;%\n  rename(Counts = Freq) %&gt;%\n  t()\n\n           [,1]        [,2]       \nsevere     \"0\"         \"1\"        \nCounts     \"56029\"     \" 8078\"    \nProportion \"0.8739919\" \"0.1260081\""
+  },
+  {
+    "objectID": "projects/DM Project/index.html#smote",
+    "href": "projects/DM Project/index.html#smote",
     "title": "Traffic Accidents in the Twin Cities Before and After COVID",
     "section": "SMOTE",
     "text": "SMOTE\nThere is a class imbalance to address: only about 12% of observations were in the severe category.\n\n# Apply SMOTE to the training data to only oversample the minority class\nsmoted &lt;- performanceEstimation::smote(severe ~ ., data = train, \n                                            perc.over = .7, k = 5, perc.under = 7)\n# Over/under values:\n# .3 and 21 gave 50883 and 10501\n\n# .5 and 11 gave 44429 and 12117\n  # Sensitivity: .439\n\n# .7 and 7 gave 39578 and 13732\n  # Sensitivity: .539\n\n# Checking the class distribution in the final dataset\nsmoted %&gt;%\n  select(severe) %&gt;%\n  table() %&gt;%\n  as.data.frame() %&gt;%\n  mutate(Proportion = Freq / sum(Freq)) %&gt;%\n  rename(Counts = Freq) %&gt;%\n  t()\n\n           [,1]        [,2]       \nsevere     \"0\"         \"1\"        \nCounts     \"39578\"     \"13732\"    \nProportion \"0.7424123\" \"0.2575877\"\n\n\nI used smote to generate additional records for the severe accidents, while downsampling the less severe accidents."
