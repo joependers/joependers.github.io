@@ -10,7 +10,7 @@ about:
     - icon: linkedin
       href: https://linkedin.com. # change to your linkedin address
     - icon: github
-      href: https://github.com # change to your github address
+      href: https://github.com/joependers/joependers.github.io
 ---
 
 This is a Quarto website.
